@@ -149,7 +149,7 @@ export function UploadPanel({
         <h2 className="text-base font-semibold text-app-text">上传图片</h2>
         <p className="mt-1 text-sm text-app-muted">上传原图、参考妆容和可选遮罩。</p>
         <p className="mt-2 rounded-xl bg-[#F8FAFF] px-3 py-2 text-xs leading-5 text-app-muted">
-          建议上传 5MB 以下图片，避免线上环境请求超时。
+          建议上传 3MB 以下图片，线上环境更稳定。
         </p>
       </div>
 

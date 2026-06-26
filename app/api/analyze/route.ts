@@ -12,6 +12,8 @@ import {
 import { FIXED_GPT_MODEL, FIXED_RELAY_BASE_URL } from "@/lib/relayConfig";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const validIntensity = ["light", "medium", "strong"] as const;
 const validEditAreas = ["fullFace", "eyes", "lips", "blush", "highlight"] as const;

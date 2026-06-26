@@ -123,7 +123,8 @@ export function createOpenAIClient({ apiKey, baseUrl, proxyUrl }: OpenAIClientOp
   const resolvedBaseUrl = validateOpenAIBaseUrl(resolveOpenAIBaseUrl(baseUrl));
   const resolvedProxyUrl = validateProxyUrl(resolveOpenAIProxyUrl(proxyUrl));
   const clientOptions: ConstructorParameters<typeof OpenAI>[0] = {
-    apiKey: resolvedApiKey
+    apiKey: resolvedApiKey,
+    timeout: 50000
   };
 
   if (resolvedBaseUrl) {

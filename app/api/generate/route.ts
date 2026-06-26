@@ -6,12 +6,16 @@ import type { OriginalAspect, OutputResolution } from "@/lib/mock";
 import { FIXED_RELAY_BASE_URL } from "@/lib/relayConfig";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const validIntensity = ["light", "medium", "strong"] as const;
 const validEditArea = ["fullFace", "eyes", "lips", "blush", "highlight"] as const;
 const validPreserveLevel = ["strict", "normal", "softEnhance"] as const;
 const validOutputCount = [1, 2, 4] as const;
 const validOutputResolution = ["1K", "2K"] as const;
+const VERCEL_RESPONSE_BUDGET_MS = 55000;
+const MIN_RELAY_ATTEMPT_MS = 10000;
 
 function sanitizeDebugText(value: string) {
   return value
@@ -37,7 +41,7 @@ function getSafeErrorDebug(error: unknown) {
 function getGenerateErrorResponse(error: unknown) {
   if (error instanceof AppApiError) {
     return {
-      status: 400,
+      status: error.code === "IMAGE_RELAY_TIMEOUT" ? 504 : 400,
       body: {
         ok: false,
         error: toBananaRelayApiError(error)
@@ -51,7 +55,7 @@ function getGenerateErrorResponse(error: unknown) {
       ok: false,
       error: {
         code: "GENERATE_API_ERROR" as const,
-        message: "生成接口内部错误，请查看 debug。",
+        message: "生成接口失败，请查看 debug。",
         debug: getSafeErrorDebug(error)
       }
     }
@@ -178,6 +182,7 @@ async function readOriginalAspect(file: File): Promise<OriginalAspect> {
 
 export async function POST(request: Request) {
   try {
+    const deadline = Date.now() + VERCEL_RESPONSE_BUDGET_MS;
     const formData = await request.formData();
     const originalImageFile = getImageFile(formData, "originalImage");
     const referenceImageFile = getImageFile(formData, "referenceImage");
@@ -193,6 +198,16 @@ export async function POST(request: Request) {
     const images = [];
 
     for (let index = 0; index < settings.outputCount; index += 1) {
+      const remainingMs = deadline - Date.now();
+
+      if (remainingMs < MIN_RELAY_ATTEMPT_MS) {
+        throw new AppApiError(
+          "IMAGE_RELAY_TIMEOUT",
+          "生图请求超时。请尝试选择 1K、输出 1 张，或上传更小的图片。",
+          `Vercel function response budget nearly exhausted before variation ${index + 1}. remainingMs=${remainingMs}`
+        );
+      }
+
       const generated = await generateNanoBananaRelayImage({
         apiKey,
         baseUrl: FIXED_RELAY_BASE_URL,
@@ -201,7 +216,8 @@ export async function POST(request: Request) {
         nanoPrompt,
         negativePrompt,
         settings: generationSettings,
-        variationIndex: index + 1
+        variationIndex: index + 1,
+        requestTimeoutMs: Math.min(50000, Math.max(MIN_RELAY_ATTEMPT_MS, remainingMs - 3000))
       });
 
       images.push({

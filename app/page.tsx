@@ -33,11 +33,15 @@ type GenerateApiResponse =
   | { ok: true; images: GenerateImageResponse[] }
   | { ok: false; error: AnalyzeApiError | string };
 
+type AnalyzeApiResponse =
+  | { ok: true; analysis: MakeupAnalysisResult }
+  | { ok: false; error: AnalyzeApiError | string };
+
 const initialSettings: GenerationSettings = {
   intensity: "medium",
   scope: "full-face",
   preservation: "strict",
-  outputCount: 2,
+  outputCount: 1,
   outputResolution: "1K"
 };
 
@@ -99,17 +103,21 @@ function createGeneratedResults(images: GenerateImageResponse[], generationIndex
   }));
 }
 
-async function parseGenerateApiResponse(response: Response): Promise<GenerateApiResponse> {
+async function parseApiJsonResponse<T>(
+  response: Response,
+  routePath: string,
+  fallbackCode: AnalyzeApiError["code"]
+): Promise<T | { ok: false; error: AnalyzeApiError }> {
   const text = await response.text();
 
   try {
-    return JSON.parse(text) as GenerateApiResponse;
+    return JSON.parse(text) as T;
   } catch {
     return {
       ok: false,
       error: {
-        code: "GENERATE_API_ERROR",
-        message: "生成接口返回了非 JSON 响应，请检查 /api/generate 是否报错。",
+        code: fallbackCode,
+        message: `${routePath} 返回了非 JSON 响应，可能是线上 API 超时或 Vercel 函数报错。`,
         debug: [
           `HTTP status: ${response.status}`,
           `Content-Type: ${response.headers.get("content-type") ?? "(empty)"}`,
@@ -273,9 +281,11 @@ export default function Home() {
           method: "POST",
           body: analyzeFormData
         });
-        const analyzeData = (await analyzeResponse.json()) as
-          | { ok: true; analysis: MakeupAnalysisResult }
-          | { ok: false; error: AnalyzeApiError | string };
+        const analyzeData = await parseApiJsonResponse<AnalyzeApiResponse>(
+          analyzeResponse,
+          "/api/analyze",
+          "OPENAI_API_ERROR"
+        );
 
         if (!analyzeResponse.ok || !analyzeData.ok) {
           if (!analyzeData.ok && typeof analyzeData.error === "object") {
@@ -311,7 +321,11 @@ export default function Home() {
         method: "POST",
         body: generateFormData
       });
-      const generateData = await parseGenerateApiResponse(generateResponse);
+      const generateData = await parseApiJsonResponse<GenerateApiResponse>(
+        generateResponse,
+        "/api/generate",
+        "GENERATE_API_ERROR"
+      );
 
       if (!generateResponse.ok || !generateData.ok) {
         if (!generateData.ok && typeof generateData.error === "object") {
@@ -332,11 +346,15 @@ export default function Home() {
         return nextIndex;
       });
     } catch (apiError) {
-      const message = apiError instanceof Error ? apiError.message : "生成失败，请稍后重试。";
+      const rawMessage = apiError instanceof Error ? apiError.message : "生成失败，请稍后重试。";
+      const message =
+        /failed to fetch|networkerror|load failed/i.test(rawMessage)
+          ? "请求没有收到后端结构化响应，可能是线上 API 超时、网络中断或 Vercel 函数被提前终止。请先选择 1K、输出 1 张，并上传更小的图片重试。"
+          : rawMessage;
       setAnalysisError({
         code: "BANANA_RELAY_CONNECTION_FAILED",
         message,
-        debug: "Frontend fetch or response parsing failed before receiving a structured API error."
+        debug: `Frontend fetch or response parsing failed before receiving a structured API error. Raw error: ${rawMessage}`
       });
     } finally {
       setLoadingAction(null);

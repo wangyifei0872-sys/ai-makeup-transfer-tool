@@ -144,6 +144,12 @@ export function ControlPanel({
           onChange={(outputResolution) => onSettingsChange({ ...settings, outputResolution })}
         />
 
+        {settings.outputResolution === "2K" || settings.outputCount !== 1 ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-800">
+            线上生成可能较慢，建议先用 1K / 1 张测试；稳定后再尝试 2K 或多张输出。
+          </div>
+        ) : null}
+
         <div className="rounded-2xl border border-app-border bg-[#F8FAFF] p-4">
           <div className="text-sm font-semibold text-app-text">固定模型配置</div>
           <dl className="mt-3 space-y-2 text-xs">

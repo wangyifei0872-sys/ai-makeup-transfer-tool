@@ -2,7 +2,7 @@ import { AppApiError, type AnalyzeApiError } from "@/lib/analyzeErrors";
 import { FIXED_IMAGE_MODEL } from "@/lib/imageModels";
 import type { OriginalAspect, OutputResolution } from "@/lib/mock";
 
-const REQUEST_TIMEOUT_MS = 120000;
+const REQUEST_TIMEOUT_MS = 50000;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
@@ -24,6 +24,7 @@ type GenerateViaRelayOptions = {
   negativePrompt: string;
   settings: ImageRelaySettings;
   variationIndex: number;
+  requestTimeoutMs?: number;
 };
 
 type RelayImageResult = {
@@ -36,6 +37,7 @@ type ImageGenerationRequest = {
   baseUrl?: string | null;
   actualModelName: string;
   outputResolution: OutputResolution;
+  requestTimeoutMs?: number;
   retryOnProhibited?: boolean;
   safetyRetryPrompt?: string;
   content: Array<
@@ -384,6 +386,7 @@ export async function requestOpenRouterImageGeneration({
   baseUrl,
   actualModelName,
   outputResolution,
+  requestTimeoutMs,
   retryOnProhibited,
   safetyRetryPrompt,
   content
@@ -391,7 +394,7 @@ export async function requestOpenRouterImageGeneration({
   const resolvedApiKey = getApiKey(apiKey);
   const url = getChatCompletionsUrl(baseUrl);
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, {
@@ -486,6 +489,7 @@ export async function requestOpenRouterImageGeneration({
           baseUrl,
           actualModelName,
           outputResolution,
+          requestTimeoutMs,
           retryOnProhibited: false,
           safetyRetryPrompt,
           content: saferContent
@@ -507,7 +511,8 @@ export async function generateNanoBananaRelayImage({
   nanoPrompt,
   negativePrompt,
   settings,
-  variationIndex
+  variationIndex,
+  requestTimeoutMs
 }: GenerateViaRelayOptions) {
   const [originalImageDataUrl, referenceImageDataUrl] = await Promise.all([
     fileToDataUrl(originalImageFile, "originalImage"),
@@ -519,6 +524,7 @@ export async function generateNanoBananaRelayImage({
     baseUrl,
     actualModelName: FIXED_IMAGE_MODEL.model,
     outputResolution: settings.outputResolution,
+    requestTimeoutMs,
     retryOnProhibited: true,
     safetyRetryPrompt: buildSaferPrompt({ variationIndex }),
     content: [
@@ -571,7 +577,7 @@ export function toBananaRelayApiError(error: unknown): AnalyzeApiError {
   if (error instanceof Error && error.name === "AbortError") {
     return {
       code: "IMAGE_RELAY_TIMEOUT",
-      message: "生图中转请求超时，请稍后重试，或检查中转服务状态。",
+      message: "生图请求超时。请尝试选择 1K、输出 1 张，或上传更小的图片。",
       debug: "AbortController timed out while calling image relay generation."
     };
   }
@@ -582,7 +588,7 @@ export function toBananaRelayApiError(error: unknown): AnalyzeApiError {
   if (/timeout|timed out|etimedout/i.test(message)) {
     return {
       code: "IMAGE_RELAY_TIMEOUT",
-      message: "生图中转请求超时，请稍后重试，或检查中转服务状态。",
+      message: "生图请求超时。请尝试选择 1K、输出 1 张，或上传更小的图片。",
       debug
     };
   }
