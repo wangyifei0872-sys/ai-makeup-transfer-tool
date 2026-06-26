@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import sharp from "sharp";
 import { AppApiError } from "@/lib/analyzeErrors";
 import { generateNanoBananaRelayImage, toBananaRelayApiError } from "@/lib/nanoBananaRelay";
 import type { OriginalAspect, OutputResolution } from "@/lib/mock";
@@ -170,11 +169,117 @@ function getOriginalAspect(width?: number, height?: number): OriginalAspect {
   return width > height ? "landscape" : "portrait";
 }
 
+function readUint24LE(buffer: Buffer, offset: number) {
+  return buffer[offset] + (buffer[offset + 1] << 8) + (buffer[offset + 2] << 16);
+}
+
+function getPngDimensions(buffer: Buffer) {
+  const pngSignature = "89504e470d0a1a0a";
+
+  if (buffer.length >= 24 && buffer.subarray(0, 8).toString("hex") === pngSignature) {
+    return {
+      width: buffer.readUInt32BE(16),
+      height: buffer.readUInt32BE(20)
+    };
+  }
+
+  return null;
+}
+
+function getJpegDimensions(buffer: Buffer) {
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) {
+    return null;
+  }
+
+  let offset = 2;
+  const sofMarkers = new Set([
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf
+  ]);
+
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+
+    const marker = buffer[offset + 1];
+    const segmentLength = buffer.readUInt16BE(offset + 2);
+
+    if (sofMarkers.has(marker)) {
+      return {
+        height: buffer.readUInt16BE(offset + 5),
+        width: buffer.readUInt16BE(offset + 7)
+      };
+    }
+
+    if (segmentLength < 2) {
+      return null;
+    }
+
+    offset += 2 + segmentLength;
+  }
+
+  return null;
+}
+
+function getWebpDimensions(buffer: Buffer) {
+  if (
+    buffer.length < 30 ||
+    buffer.subarray(0, 4).toString("ascii") !== "RIFF" ||
+    buffer.subarray(8, 12).toString("ascii") !== "WEBP"
+  ) {
+    return null;
+  }
+
+  let offset = 12;
+
+  while (offset + 8 <= buffer.length) {
+    const chunkType = buffer.subarray(offset, offset + 4).toString("ascii");
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    const dataOffset = offset + 8;
+
+    if (dataOffset + chunkSize > buffer.length) {
+      return null;
+    }
+
+    if (chunkType === "VP8X" && chunkSize >= 10) {
+      return {
+        width: readUint24LE(buffer, dataOffset + 4) + 1,
+        height: readUint24LE(buffer, dataOffset + 7) + 1
+      };
+    }
+
+    if (chunkType === "VP8 " && chunkSize >= 10) {
+      return {
+        width: buffer.readUInt16LE(dataOffset + 6) & 0x3fff,
+        height: buffer.readUInt16LE(dataOffset + 8) & 0x3fff
+      };
+    }
+
+    if (chunkType === "VP8L" && chunkSize >= 5 && buffer[dataOffset] === 0x2f) {
+      const bits = buffer.readUInt32LE(dataOffset + 1);
+
+      return {
+        width: (bits & 0x3fff) + 1,
+        height: ((bits >> 14) & 0x3fff) + 1
+      };
+    }
+
+    offset = dataOffset + chunkSize + (chunkSize % 2);
+  }
+
+  return null;
+}
+
+function getImageDimensionsFromBuffer(buffer: Buffer) {
+  return getPngDimensions(buffer) ?? getJpegDimensions(buffer) ?? getWebpDimensions(buffer);
+}
+
 async function readOriginalAspect(file: File): Promise<OriginalAspect> {
   try {
     const buffer = Buffer.from(await file.arrayBuffer());
-    const metadata = await sharp(buffer).metadata();
-    return getOriginalAspect(metadata.width, metadata.height);
+    const dimensions = getImageDimensionsFromBuffer(buffer);
+    return getOriginalAspect(dimensions?.width, dimensions?.height);
   } catch {
     return "unknown";
   }
