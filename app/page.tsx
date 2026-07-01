@@ -4,15 +4,21 @@ import { useEffect, useRef, useState } from "react";
 import { ApiKeySettingsModal } from "@/components/ApiKeySettingsModal";
 import { ControlPanel } from "@/components/ControlPanel";
 import { Header } from "@/components/Header";
+import { HistoryLibraryModal } from "@/components/HistoryLibraryModal";
 import { ResultPanel } from "@/components/ResultPanel";
 import { UploadPanel } from "@/components/UploadPanel";
 import { getStoredApiKeys, hasRequiredKeys } from "@/lib/apiKeys";
+import { saveHistoryImage } from "@/lib/historyDb";
+import { FIXED_IMAGE_MODEL } from "@/lib/relayConfig";
 import {
   createMockResults,
+  type EnhanceStrength,
   type GenerationSettings,
   type MockResult,
   type OriginalAspect,
+  type OutputAspectRatio,
   type OutputResolution,
+  type FixedOutputAspectRatio,
   type UploadedImage
 } from "@/lib/mock";
 import type { AnalyzeApiError } from "@/lib/analyzeErrors";
@@ -20,17 +26,34 @@ import type { MakeupAnalysisResult } from "@/lib/promptBuilder";
 
 type UploadFieldKey = "source" | "reference" | "mask";
 type LoadingAction = "analyze" | "generate" | "regenerate" | "refine" | null;
+type ThemeMode = "light" | "dark";
+
+const THEME_STORAGE_KEY = "makeup_tool_theme";
 
 type GenerateImageResponse = {
   id: string;
   dataUrl: string;
   mimeType: string;
   outputResolution?: OutputResolution;
+  outputAspectRatio?: OutputAspectRatio;
+  resolvedAspectRatio?: FixedOutputAspectRatio;
   originalAspect?: OriginalAspect;
 };
 
 type GenerateApiResponse =
   | { ok: true; images: GenerateImageResponse[] }
+  | { ok: false; error: AnalyzeApiError | string };
+
+type EnhanceImageResponse = {
+  id: string;
+  dataUrl: string;
+  mimeType: string;
+  outputResolution?: OutputResolution;
+  enhanceStrength?: EnhanceStrength;
+};
+
+type EnhanceApiResponse =
+  | { ok: true; image: EnhanceImageResponse }
   | { ok: false; error: AnalyzeApiError | string };
 
 type AnalyzeApiResponse =
@@ -42,7 +65,8 @@ const initialSettings: GenerationSettings = {
   scope: "full-face",
   preservation: "strict",
   outputCount: 1,
-  outputResolution: "1K"
+  outputResolution: "1K",
+  outputAspectRatio: "original"
 };
 
 function createUploadedImage(file: File): UploadedImage {
@@ -99,8 +123,100 @@ function createGeneratedResults(images: GenerateImageResponse[], generationIndex
       minute: "2-digit"
     }),
     outputResolution: image.outputResolution,
+    outputAspectRatio: image.outputAspectRatio,
+    resolvedAspectRatio: image.resolvedAspectRatio,
     originalAspect: image.originalAspect
   }));
+}
+
+function createEnhancedResult(
+  image: EnhanceImageResponse,
+  sourceResult: MockResult,
+  enhancedIndex: number
+): MockResult {
+  return {
+    id: `${image.id}-${Date.now()}`,
+    imageUrl: image.dataUrl,
+    label: `增强结果 ${enhancedIndex}`,
+    generatedAt: new Date().toLocaleTimeString("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit"
+    }),
+    outputResolution: image.outputResolution,
+    outputAspectRatio: sourceResult.outputAspectRatio,
+    resolvedAspectRatio: sourceResult.resolvedAspectRatio,
+    enhanceStrength: image.enhanceStrength,
+    isEnhanced: true
+  };
+}
+
+function saveGeneratedResultsToHistory({
+  results,
+  sourceImage,
+  referenceImage,
+  settings,
+  analysis
+}: {
+  results: MockResult[];
+  sourceImage: UploadedImage;
+  referenceImage: UploadedImage;
+  settings: GenerationSettings;
+  analysis: MakeupAnalysisResult;
+}) {
+  void Promise.all(
+    results
+      .filter((result) => !result.isMock)
+      .map((result, index) =>
+        saveHistoryImage({
+          imageDataUrl: result.imageUrl,
+          type: "generated",
+          title: `生成结果 ${index + 1}`,
+          originalFileName: sourceImage.fileName,
+          referenceFileName: referenceImage.fileName,
+          outputResolution: result.outputResolution ?? settings.outputResolution,
+          outputAspectRatio: result.outputAspectRatio ?? settings.outputAspectRatio,
+          mappedAspectRatio: result.resolvedAspectRatio,
+          makeupIntensity: settings.intensity,
+          editArea: settings.scope,
+          preserveLevel: settings.preservation,
+          model: FIXED_IMAGE_MODEL.label,
+          prompt: analysis.nano_prompt_en
+        })
+      )
+  ).catch(() => {
+    // History is a convenience feature; generation should stay successful even if local storage fails.
+  });
+}
+
+function saveEnhancedResultToHistory({
+  result,
+  sourceResult,
+  sourceImage,
+  referenceImage,
+  settings
+}: {
+  result: MockResult;
+  sourceResult: MockResult;
+  sourceImage: UploadedImage | null;
+  referenceImage: UploadedImage | null;
+  settings: GenerationSettings;
+}) {
+  void saveHistoryImage({
+    imageDataUrl: result.imageUrl,
+    type: "enhanced",
+    title: result.label,
+    originalFileName: sourceImage?.fileName,
+    referenceFileName: referenceImage?.fileName,
+    outputResolution: result.outputResolution ?? settings.outputResolution,
+    outputAspectRatio: result.outputAspectRatio ?? sourceResult.outputAspectRatio,
+    mappedAspectRatio: result.resolvedAspectRatio ?? sourceResult.resolvedAspectRatio,
+    makeupIntensity: settings.intensity,
+    editArea: settings.scope,
+    preserveLevel: settings.preservation,
+    model: FIXED_IMAGE_MODEL.label
+  }).catch(() => {
+    // History is a convenience feature; enhancement should stay successful even if local storage fails.
+  });
 }
 
 async function parseApiJsonResponse<T>(
@@ -132,16 +248,20 @@ export default function Home() {
   const [sourceImage, setSourceImage] = useState<UploadedImage | null>(null);
   const [referenceImage, setReferenceImage] = useState<UploadedImage | null>(null);
   const [maskImage, setMaskImage] = useState<UploadedImage | null>(null);
+  const [maskBase64, setMaskBase64] = useState<string | null>(null);
   const [settings, setSettings] = useState<GenerationSettings>(initialSettings);
+  const [theme, setTheme] = useState<ThemeMode>("light");
   const [results, setResults] = useState<MockResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [analysisError, setAnalysisError] = useState<AnalyzeApiError | null>(null);
   const [analysis, setAnalysis] = useState<MakeupAnalysisResult | null>(null);
   const [apiKeysConfigured, setApiKeysConfigured] = useState(false);
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [apiKeyModalMessage, setApiKeyModalMessage] = useState<string | null>(null);
   const [loadingAction, setLoadingAction] = useState<LoadingAction>(null);
   const [downloadLoadingId, setDownloadLoadingId] = useState<string | null>(null);
+  const [enhanceLoadingId, setEnhanceLoadingId] = useState<string | null>(null);
   const [refinePrompt, setRefinePrompt] = useState("");
   const [generationIndex, setGenerationIndex] = useState(0);
   const latestImageUrlsRef = useRef<string[]>([]);
@@ -152,11 +272,20 @@ export default function Home() {
 
   useEffect(() => {
     setApiKeysConfigured(hasRequiredKeys());
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+
+    if (storedTheme === "dark" || storedTheme === "light") {
+      setTheme(storedTheme);
+    }
 
     return () => {
       latestImageUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   const replaceImage = (
     setter: (image: UploadedImage | null) => void,
@@ -174,6 +303,7 @@ export default function Home() {
 
     if (key === "source") {
       replaceImage(setSourceImage, sourceImage, uploadedImage);
+      setMaskBase64(null);
       setResults([]);
       setAnalysis(null);
       readImageDimensions(uploadedImage.url)
@@ -216,6 +346,7 @@ export default function Home() {
   const handleRemove = (key: UploadFieldKey) => {
     if (key === "source") {
       replaceImage(setSourceImage, sourceImage, null);
+      setMaskBase64(null);
       setResults([]);
       setAnalysis(null);
     }
@@ -228,6 +359,7 @@ export default function Home() {
 
     if (key === "mask") {
       replaceImage(setMaskImage, maskImage, null);
+      setMaskBase64(null);
     }
   };
 
@@ -315,7 +447,11 @@ export default function Home() {
       generateFormData.append("preserveLevel", mapPreservationLevel(settings.preservation));
       generateFormData.append("outputCount", String(settings.outputCount));
       generateFormData.append("outputResolution", settings.outputResolution);
+      generateFormData.append("outputAspectRatio", settings.outputAspectRatio);
       generateFormData.append("relayApiKey", relayApiKey);
+      if (maskBase64) {
+        generateFormData.append("maskBase64", maskBase64);
+      }
 
       const generateResponse = await fetch("/api/generate", {
         method: "POST",
@@ -340,10 +476,17 @@ export default function Home() {
         );
       }
 
-      setGenerationIndex((currentIndex) => {
-        const nextIndex = currentIndex + 1;
-        setResults(createGeneratedResults(generateData.images, nextIndex));
-        return nextIndex;
+      const nextIndex = generationIndex + 1;
+      const nextResults = createGeneratedResults(generateData.images, nextIndex);
+
+      setGenerationIndex(nextIndex);
+      setResults(nextResults);
+      saveGeneratedResultsToHistory({
+        results: nextResults,
+        sourceImage,
+        referenceImage,
+        settings,
+        analysis: activeAnalysis
       });
     } catch (apiError) {
       const rawMessage = apiError instanceof Error ? apiError.message : "生成失败，请稍后重试。";
@@ -369,6 +512,86 @@ export default function Home() {
     });
   };
 
+  const handleEnhance = async (result: MockResult, enhanceStrength: EnhanceStrength) => {
+    if (results.length === 0 || result.isMock) {
+      setAnalysisError({
+        code: "GENERATE_REQUEST_INVALID",
+        message: "请先生成真实结果图，再进行画质增强。",
+        debug: "Enhance requires an existing non-mock generated result."
+      });
+      return;
+    }
+
+    const { relayApiKey } = getStoredApiKeys();
+
+    if (!relayApiKey.trim()) {
+      setApiKeyModalMessage("请先填写 API Key，用于画质增强。");
+      setApiKeyModalOpen(true);
+      setApiKeysConfigured(false);
+      return;
+    }
+
+    setAnalysisError(null);
+    setEnhanceLoadingId(result.id);
+
+    try {
+      const enhanceFormData = new FormData();
+      enhanceFormData.append("relayApiKey", relayApiKey);
+      enhanceFormData.append("generatedImage", result.imageUrl);
+      enhanceFormData.append("enhanceStrength", enhanceStrength);
+      enhanceFormData.append("outputResolution", settings.outputResolution);
+
+      const enhanceResponse = await fetch("/api/enhance", {
+        method: "POST",
+        body: enhanceFormData
+      });
+      const enhanceData = await parseApiJsonResponse<EnhanceApiResponse>(
+        enhanceResponse,
+        "/api/enhance",
+        "GENERATE_API_ERROR"
+      );
+
+      if (!enhanceResponse.ok || !enhanceData.ok) {
+        if (!enhanceData.ok && typeof enhanceData.error === "object") {
+          setAnalysisError(enhanceData.error);
+          return;
+        }
+
+        throw new Error(
+          !enhanceData.ok && typeof enhanceData.error === "string"
+            ? enhanceData.error
+            : "画质增强失败。"
+        );
+      }
+
+      const enhancedIndex = results.filter((item) => item.isEnhanced).length + 1;
+      const enhancedResult = createEnhancedResult(enhanceData.image, result, enhancedIndex);
+
+      setResults((currentResults) => [...currentResults, enhancedResult]);
+      saveEnhancedResultToHistory({
+        result: enhancedResult,
+        sourceResult: result,
+        sourceImage,
+        referenceImage,
+        settings
+      });
+    } catch (apiError) {
+      const rawMessage = apiError instanceof Error ? apiError.message : "画质增强失败，请稍后重试。";
+      const message =
+        /failed to fetch|networkerror|load failed/i.test(rawMessage)
+          ? "画质增强请求没有收到后端结构化响应，可能是 API 超时或网络中断。请先使用 1K 或稍后重试。"
+          : rawMessage;
+
+      setAnalysisError({
+        code: "BANANA_RELAY_CONNECTION_FAILED",
+        message,
+        debug: `Enhance fetch or response parsing failed before receiving a structured API error. Raw error: ${rawMessage}`
+      });
+    } finally {
+      setEnhanceLoadingId(null);
+    }
+  };
+
   const handleDownload = (result: MockResult) => {
     setDownloadLoadingId(result.id);
 
@@ -384,13 +607,21 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-app-bg">
+    <main className={`min-h-screen bg-[#F6F7FB] ${theme === "dark" ? "dark" : ""}`}>
       <Header
         apiKeysConfigured={apiKeysConfigured}
+        theme={theme}
+        onOpenHistory={() => setHistoryModalOpen(true)}
+        onToggleTheme={() => setTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"))}
         onOpenSettings={() => {
           setApiKeyModalMessage(null);
           setApiKeyModalOpen(true);
         }}
+      />
+
+      <HistoryLibraryModal
+        open={historyModalOpen}
+        onClose={() => setHistoryModalOpen(false)}
       />
 
       <ApiKeySettingsModal
@@ -410,15 +641,17 @@ export default function Home() {
         }}
       />
 
-      <div className="mx-auto max-w-[1440px] px-8 py-6">
-        <div className="grid grid-cols-[390px_420px_minmax(0,1fr)] items-start gap-6">
+      <div className="mx-auto max-w-[1500px] px-5 py-6 lg:px-8">
+        <div className="grid items-stretch gap-6 xl:grid-cols-[360px_460px_minmax(0,1fr)] 2xl:grid-cols-[460px_520px_minmax(0,1fr)]">
           <UploadPanel
             sourceImage={sourceImage}
             referenceImage={referenceImage}
             maskImage={maskImage}
+            maskBase64={maskBase64}
             error={error}
             onUpload={handleUpload}
             onRemove={handleRemove}
+            onMaskChange={setMaskBase64}
           />
           <ControlPanel
             settings={settings}
@@ -433,10 +666,12 @@ export default function Home() {
             analysisError={analysisError}
             refinePrompt={refinePrompt}
             downloadLoadingId={downloadLoadingId}
+            enhanceLoadingId={enhanceLoadingId}
             onRefinePromptChange={setRefinePrompt}
             onRegenerate={() => runGeneration("regenerate")}
             onRefine={handleRefine}
             onUseMockFallback={useMockResults}
+            onEnhance={handleEnhance}
             onDownload={handleDownload}
           />
         </div>

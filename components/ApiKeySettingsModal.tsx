@@ -9,7 +9,11 @@ import {
   saveApiKeys,
   type StoredApiKeys
 } from "@/lib/apiKeys";
-import { FIXED_GPT_MODEL, FIXED_IMAGE_MODEL, FIXED_RELAY_SERVICE_NAME } from "@/lib/relayConfig";
+import {
+  FIXED_GPT_MODEL,
+  FIXED_IMAGE_MODEL,
+  FIXED_RELAY_SERVICE_NAME
+} from "@/lib/relayConfig";
 
 type ApiKeySettingsModalProps = {
   open: boolean;

@@ -1,6 +1,11 @@
 import { AppApiError, type AnalyzeApiError } from "@/lib/analyzeErrors";
 import { FIXED_IMAGE_MODEL } from "@/lib/imageModels";
-import type { OriginalAspect, OutputResolution } from "@/lib/mock";
+import type {
+  FixedOutputAspectRatio,
+  OriginalAspect,
+  OutputAspectRatio,
+  OutputResolution
+} from "@/lib/mock";
 
 const REQUEST_TIMEOUT_MS = 50000;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -12,6 +17,8 @@ type ImageRelaySettings = {
   preserveLevel: string;
   outputCount: number;
   outputResolution: OutputResolution;
+  outputAspectRatio: OutputAspectRatio;
+  resolvedAspectRatio: FixedOutputAspectRatio;
   originalAspect: OriginalAspect;
 };
 
@@ -37,6 +44,7 @@ type ImageGenerationRequest = {
   baseUrl?: string | null;
   actualModelName: string;
   outputResolution: OutputResolution;
+  resolvedAspectRatio?: FixedOutputAspectRatio;
   requestTimeoutMs?: number;
   retryOnProhibited?: boolean;
   safetyRetryPrompt?: string;
@@ -58,7 +66,8 @@ function sanitizeDebugText(value: string) {
   return value
     .replace(/Bearer\s+[^\s"',;:]+/gi, "Bearer ****")
     .replace(/sk-[^\s"',;:]+/g, "sk-****")
-    .replace(/AIza[^\s"',;:]+/g, "AIza****");
+    .replace(/AIza[^\s"',;:]+/g, "AIza****")
+    .replace(/(relayApiKey|apiKey|authorization)["'\s:=]+[^"',;\s}]+/gi, "$1=****");
 }
 
 function getApiKey(apiKey?: string | null) {
@@ -81,7 +90,7 @@ export function normalizeRelayBaseUrl(baseUrl?: string | null) {
   if (!trimmed) {
     throw new AppApiError(
       "MISSING_RELAY_BASE_URL",
-      "缺少 Base URL / 中转地址，请在设置中填写。",
+      "缺少 Base URL / 中转地址，请检查固定配置。",
       "No relayBaseUrl value was provided."
     );
   }
@@ -151,8 +160,11 @@ async function fileToDataUrl(file: File, fieldName: string) {
 function buildFinalPrompt({
   nanoPrompt,
   negativePrompt,
-  variationIndex
-}: Pick<GenerateViaRelayOptions, "nanoPrompt" | "negativePrompt" | "variationIndex">) {
+  variationIndex,
+  resolvedAspectRatio
+}: Pick<GenerateViaRelayOptions, "nanoPrompt" | "negativePrompt" | "variationIndex"> & {
+  resolvedAspectRatio: FixedOutputAspectRatio;
+}) {
   return `This is a non-sexual cosmetic makeup transfer task on an adult stylized female portrait illustration.
 Focus only on face makeup editing.
 Do not change body, clothing, pose, skin exposure, or background.
@@ -161,7 +173,7 @@ Use the second image only as the fashion makeup reference.
 Apply the cosmetic makeup style from the reference image to the adult female character in the original illustration.
 Preserve the original identity, face shape, eye shape, facial proportions, hairstyle, expression, pose, composition, art style, lighting, brightness, contrast, saturation and background.
 Only modify makeup-related areas: eye makeup, eyebrow tone, cheek blush, lip color and subtle lip highlight, facial highlights and eye color if requested.
-Keep the output in the same aspect ratio as the original image.
+Use the requested output aspect ratio: ${resolvedAspectRatio}.
 Do not crop the face incorrectly.
 Do not stretch or squash the image.
 Do not make the image sexualized.
@@ -184,7 +196,12 @@ Variation index:
 ${variationIndex}`;
 }
 
-function buildSaferPrompt({ variationIndex }: Pick<GenerateViaRelayOptions, "variationIndex">) {
+function buildSaferPrompt({
+  variationIndex,
+  resolvedAspectRatio
+}: Pick<GenerateViaRelayOptions, "variationIndex"> & {
+  resolvedAspectRatio?: FixedOutputAspectRatio;
+}) {
   return `This is a safe, non-sexual face makeup editing task for an adult stylized portrait illustration.
 Use the first image as the base portrait.
 Use the second image only as a cosmetic makeup reference.
@@ -193,7 +210,7 @@ Preserve the adult character identity, face shape, facial proportions, hairstyle
 Do not alter the body, clothing, shoulders, neckline, skin exposure, or age.
 Do not sexualize the character.
 Do not add text.
-Keep the output in the same aspect ratio as the original image.
+Use the requested output aspect ratio: ${resolvedAspectRatio ?? "1:1"}.
 Do not crop the face incorrectly.
 Do not stretch or squash the image.
 Return only the edited portrait image.
@@ -340,8 +357,7 @@ export function parseRelayImageResponse(payload: unknown): RelayImageResult {
       : null;
 
   const messageImages = Array.isArray(message?.images) ? message.images : [];
-  const firstMessageImage = messageImages[0];
-  const messageImageUrl = getNestedImageUrl(firstMessageImage);
+  const messageImageUrl = getNestedImageUrl(messageImages[0]);
 
   if (messageImageUrl) {
     const parsed = normalizeImageUrl(messageImageUrl);
@@ -358,8 +374,7 @@ export function parseRelayImageResponse(payload: unknown): RelayImageResult {
   }
 
   const data = Array.isArray(response.data) ? response.data : [];
-  const firstData = data[0];
-  const dataImageUrl = getNestedImageUrl(firstData);
+  const dataImageUrl = getNestedImageUrl(data[0]);
 
   if (dataImageUrl) {
     const parsed = normalizeImageUrl(dataImageUrl);
@@ -386,6 +401,7 @@ export async function requestOpenRouterImageGeneration({
   baseUrl,
   actualModelName,
   outputResolution,
+  resolvedAspectRatio,
   requestTimeoutMs,
   retryOnProhibited,
   safetyRetryPrompt,
@@ -395,6 +411,13 @@ export async function requestOpenRouterImageGeneration({
   const url = getChatCompletionsUrl(baseUrl);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
+  const imageConfig: Record<string, string> = {
+    image_size: outputResolution
+  };
+
+  if (resolvedAspectRatio) {
+    imageConfig.aspect_ratio = resolvedAspectRatio;
+  }
 
   try {
     const response = await fetch(url, {
@@ -412,9 +435,7 @@ export async function requestOpenRouterImageGeneration({
           }
         ],
         modalities: ["image", "text"],
-        image_config: {
-          image_size: outputResolution
-        },
+        image_config: imageConfig,
         stream: false
       }),
       signal: controller.signal
@@ -441,7 +462,7 @@ export async function requestOpenRouterImageGeneration({
       if (response.status === 401 || response.status === 403) {
         throw new AppApiError(
           "IMAGE_MODEL_AUTH_FAILED",
-          "生图模型认证失败，请检查 API Key 是否正确，或该 Key 是否适用于当前 Base URL。",
+          "生图模型认证失败，请检查 API Key 是否正确。",
           debug
         );
       }
@@ -456,7 +477,7 @@ export async function requestOpenRouterImageGeneration({
 
       throw new AppApiError(
         "IMAGE_RELAY_CONNECTION_FAILED",
-        "生图中转请求失败，请检查 Base URL、API Key 和当前生图模型。",
+        "生图中转请求失败，请检查 API Key 和当前生图模型。",
         debug
       );
     }
@@ -489,6 +510,7 @@ export async function requestOpenRouterImageGeneration({
           baseUrl,
           actualModelName,
           outputResolution,
+          resolvedAspectRatio,
           requestTimeoutMs,
           retryOnProhibited: false,
           safetyRetryPrompt,
@@ -503,7 +525,11 @@ export async function requestOpenRouterImageGeneration({
   }
 }
 
-export async function generateNanoBananaRelayImage({
+export async function generateNanoBananaRelayImage(options: GenerateViaRelayOptions) {
+  return generateWithGeminiRelay(options);
+}
+
+export async function generateWithGeminiRelay({
   apiKey,
   baseUrl,
   originalImageFile,
@@ -524,16 +550,21 @@ export async function generateNanoBananaRelayImage({
     baseUrl,
     actualModelName: FIXED_IMAGE_MODEL.model,
     outputResolution: settings.outputResolution,
+    resolvedAspectRatio: settings.resolvedAspectRatio,
     requestTimeoutMs,
     retryOnProhibited: true,
-    safetyRetryPrompt: buildSaferPrompt({ variationIndex }),
+    safetyRetryPrompt: buildSaferPrompt({
+      variationIndex,
+      resolvedAspectRatio: settings.resolvedAspectRatio
+    }),
     content: [
       {
         type: "text",
         text: buildFinalPrompt({
           nanoPrompt,
           negativePrompt,
-          variationIndex
+          variationIndex,
+          resolvedAspectRatio: settings.resolvedAspectRatio
         })
       },
       {
@@ -596,14 +627,14 @@ export function toBananaRelayApiError(error: unknown): AnalyzeApiError {
   if (/fetch failed|network|connection|econnreset|enotfound|econnrefused/i.test(message)) {
     return {
       code: "IMAGE_RELAY_CONNECTION_FAILED",
-      message: "生图中转连接失败，请检查 Base URL、API Key 和当前生图模型。",
+      message: "生图中转连接失败，请检查 API Key 和当前生图模型。",
       debug
     };
   }
 
   return {
     code: "IMAGE_RELAY_CONNECTION_FAILED",
-    message: "生图中转连接失败，请检查 Base URL、API Key 和当前生图模型。",
+    message: "生图中转连接失败，请检查 API Key 和当前生图模型。",
     debug
   };
 }

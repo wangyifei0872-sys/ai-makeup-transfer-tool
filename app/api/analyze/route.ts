@@ -19,6 +19,18 @@ const validIntensity = ["light", "medium", "strong"] as const;
 const validEditAreas = ["fullFace", "eyes", "lips", "blush", "highlight"] as const;
 const validPreserveLevel = ["strict", "normal", "softEnhance"] as const;
 const validOutputCount = [1, 2, 4] as const;
+const ANALYSIS_IMAGE_MAX_SIZE = 1024;
+const ANALYSIS_IMAGE_QUALITY = 80;
+
+type AnalysisImageDebug = {
+  field: string;
+  originalWidth?: number;
+  originalHeight?: number;
+  compressedWidth?: number;
+  compressedHeight?: number;
+  originalBytes: number;
+  compressedBytes: number;
+};
 
 function isValidValue<T extends readonly string[]>(value: string, values: T): value is T[number] {
   return values.includes(value as T[number]);
@@ -92,10 +104,56 @@ function getImageFile(formData: FormData, key: string) {
   return value;
 }
 
-async function fileToDataUrl(file: File) {
+function formatAnalysisImageDebug(items: AnalysisImageDebug[]) {
+  if (items.length === 0) {
+    return "";
+  }
+
+  return items
+    .map((item) =>
+      [
+        `${item.field}:`,
+        `originalSize=${item.originalWidth ?? "unknown"}x${item.originalHeight ?? "unknown"}`,
+        `compressedSize=${item.compressedWidth ?? "unknown"}x${item.compressedHeight ?? "unknown"}`,
+        `originalBytes=${item.originalBytes}`,
+        `compressedBytes=${item.compressedBytes}`
+      ].join(" ")
+    )
+    .join("; ");
+}
+
+async function fileToAnalysisDataUrl(
+  file: File,
+  field: string
+): Promise<{ dataUrl: string; debug: AnalysisImageDebug }> {
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-  return `data:${file.type};base64,${buffer.toString("base64")}`;
+  const sharp = (await import("sharp")).default;
+  const originalMetadata = await sharp(buffer).metadata();
+  const compressedBuffer = await sharp(buffer)
+    .rotate()
+    .resize({
+      width: ANALYSIS_IMAGE_MAX_SIZE,
+      height: ANALYSIS_IMAGE_MAX_SIZE,
+      fit: "inside",
+      withoutEnlargement: true
+    })
+    .jpeg({ quality: ANALYSIS_IMAGE_QUALITY })
+    .toBuffer();
+  const compressedMetadata = await sharp(compressedBuffer).metadata();
+
+  return {
+    dataUrl: `data:image/jpeg;base64,${compressedBuffer.toString("base64")}`,
+    debug: {
+      field,
+      originalWidth: originalMetadata.width,
+      originalHeight: originalMetadata.height,
+      compressedWidth: compressedMetadata.width,
+      compressedHeight: compressedMetadata.height,
+      originalBytes: buffer.byteLength,
+      compressedBytes: compressedBuffer.byteLength
+    }
+  };
 }
 
 function parseModelJson(outputText: string): MakeupAnalysisResult {
@@ -111,6 +169,8 @@ function parseModelJson(outputText: string): MakeupAnalysisResult {
 }
 
 export async function POST(request: Request) {
+  const analysisImageDebug: AnalysisImageDebug[] = [];
+
   try {
     const formData = await request.formData();
     const originalImage = getImageFile(formData, "originalImage");
@@ -126,10 +186,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const [originalImageUrl, referenceImageUrl] = await Promise.all([
-      fileToDataUrl(originalImage),
-      fileToDataUrl(referenceImage)
+    const [originalAnalysisImage, referenceAnalysisImage] = await Promise.all([
+      fileToAnalysisDataUrl(originalImage, "originalImage"),
+      fileToAnalysisDataUrl(referenceImage, "referenceImage")
     ]);
+    analysisImageDebug.push(originalAnalysisImage.debug, referenceAnalysisImage.debug);
 
     const openai = createOpenAIClient({
       apiKey: relayApiKey,
@@ -157,12 +218,12 @@ export async function POST(request: Request) {
             },
             {
               type: "input_image",
-              image_url: originalImageUrl,
+              image_url: originalAnalysisImage.dataUrl,
               detail: "high"
             },
             {
               type: "input_image",
-              image_url: referenceImageUrl,
+              image_url: referenceAnalysisImage.dataUrl,
               detail: "high"
             }
           ]
@@ -186,10 +247,16 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       ok: true,
-      analysis: parseModelJson(outputText)
+      analysis: parseModelJson(outputText),
+      debug: formatAnalysisImageDebug(analysisImageDebug)
     });
   } catch (error) {
     const apiError = toOpenAIApiError(error, "GPT-5.5 分析失败，请稍后重试。");
+    const imageDebug = formatAnalysisImageDebug(analysisImageDebug);
+
+    if (imageDebug) {
+      apiError.debug = `${apiError.debug}; analysisImages=${imageDebug}`;
+    }
 
     return NextResponse.json(
       {

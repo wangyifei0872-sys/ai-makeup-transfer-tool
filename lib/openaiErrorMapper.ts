@@ -116,7 +116,7 @@ export function toOpenAIApiError(error: unknown, fallbackMessage: string): Analy
   if (error instanceof APIConnectionTimeoutError || /timeout|timed out|etimedout/i.test(message)) {
     return {
       code: "OPENAI_TIMEOUT",
-      message: "OpenAI API 请求超时，请稍后重试，或检查网络代理。",
+      message: "GPT-5.5 分析超时。请尝试上传更小的图片，或稍后重试。",
       debug
     };
   }

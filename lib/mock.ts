@@ -14,6 +14,9 @@ export type EditScope = "full-face" | "eyes" | "lips" | "blush" | "highlight";
 export type PreservationLevel = "strict" | "normal" | "soft-optimize";
 export type OutputCount = 1 | 2 | 4;
 export type OutputResolution = "1K" | "2K";
+export type FixedOutputAspectRatio = "1:1" | "3:4" | "4:3" | "2:3" | "3:2" | "9:16" | "16:9";
+export type OutputAspectRatio = "original" | FixedOutputAspectRatio;
+export type EnhanceStrength = "light" | "standard" | "strong";
 export type OriginalAspect = "portrait" | "landscape" | "square" | "unknown";
 
 export type ImageDimensions = {
@@ -27,6 +30,7 @@ export type GenerationSettings = {
   preservation: PreservationLevel;
   outputCount: OutputCount;
   outputResolution: OutputResolution;
+  outputAspectRatio: OutputAspectRatio;
 };
 
 export type MockResult = {
@@ -37,6 +41,10 @@ export type MockResult = {
   accent?: string;
   isMock?: boolean;
   outputResolution?: OutputResolution;
+  outputAspectRatio?: OutputAspectRatio;
+  resolvedAspectRatio?: FixedOutputAspectRatio;
+  enhanceStrength?: EnhanceStrength;
+  isEnhanced?: boolean;
   originalAspect?: OriginalAspect;
   originalSize?: ImageDimensions;
   generatedOriginalSize?: ImageDimensions;

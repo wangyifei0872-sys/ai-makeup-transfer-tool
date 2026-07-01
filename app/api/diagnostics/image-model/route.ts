@@ -26,6 +26,7 @@ export async function POST(request: Request) {
       baseUrl: FIXED_RELAY_BASE_URL,
       actualModelName: FIXED_IMAGE_MODEL.model,
       outputResolution: "1K",
+      resolvedAspectRatio: "1:1",
       content: [
         {
           type: "text",

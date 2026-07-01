@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
+import sharp from "sharp";
 import { AppApiError } from "@/lib/analyzeErrors";
-import { generateNanoBananaRelayImage, toBananaRelayApiError } from "@/lib/nanoBananaRelay";
-import type { OriginalAspect, OutputResolution } from "@/lib/mock";
+import { generateWithGeminiRelay, toBananaRelayApiError } from "@/lib/nanoBananaRelay";
+import type {
+  FixedOutputAspectRatio,
+  ImageDimensions,
+  OriginalAspect,
+  OutputAspectRatio,
+  OutputResolution
+} from "@/lib/mock";
 import { FIXED_RELAY_BASE_URL } from "@/lib/relayConfig";
 
 export const runtime = "nodejs";
@@ -13,6 +20,16 @@ const validEditArea = ["fullFace", "eyes", "lips", "blush", "highlight"] as cons
 const validPreserveLevel = ["strict", "normal", "softEnhance"] as const;
 const validOutputCount = [1, 2, 4] as const;
 const validOutputResolution = ["1K", "2K"] as const;
+const validOutputAspectRatio = ["original", "1:1", "3:4", "4:3", "2:3", "3:2", "9:16", "16:9"] as const;
+const fixedAspectRatios: Array<{ value: FixedOutputAspectRatio; ratio: number }> = [
+  { value: "1:1", ratio: 1 },
+  { value: "3:4", ratio: 3 / 4 },
+  { value: "4:3", ratio: 4 / 3 },
+  { value: "2:3", ratio: 2 / 3 },
+  { value: "3:2", ratio: 3 / 2 },
+  { value: "9:16", ratio: 9 / 16 },
+  { value: "16:9", ratio: 16 / 9 }
+];
 const VERCEL_RESPONSE_BUDGET_MS = 55000;
 const MIN_RELAY_ATTEMPT_MS = 10000;
 
@@ -40,7 +57,12 @@ function getSafeErrorDebug(error: unknown) {
 function getGenerateErrorResponse(error: unknown) {
   if (error instanceof AppApiError) {
     return {
-      status: error.code === "IMAGE_RELAY_TIMEOUT" ? 504 : 400,
+      status:
+        error.code === "IMAGE_RELAY_TIMEOUT"
+          ? 504
+          : error.code === "IMAGE_POSTPROCESS_FAILED"
+            ? 500
+            : 400,
       body: {
         ok: false,
         error: toBananaRelayApiError(error)
@@ -107,6 +129,7 @@ function parseSettings(formData: FormData) {
   const preserveLevel = String(formData.get("preserveLevel") ?? "");
   const outputCount = Number(formData.get("outputCount"));
   const outputResolution = String(formData.get("outputResolution") ?? "1K");
+  const outputAspectRatio = String(formData.get("outputAspectRatio") ?? "original");
 
   if (!isValidValue(makeupIntensity, validIntensity)) {
     throw new AppApiError(
@@ -148,12 +171,21 @@ function parseSettings(formData: FormData) {
     );
   }
 
+  if (!validOutputAspectRatio.includes(outputAspectRatio as OutputAspectRatio)) {
+    throw new AppApiError(
+      "GENERATE_REQUEST_INVALID",
+      "请求参数 outputAspectRatio 无效。",
+      `Invalid outputAspectRatio: ${outputAspectRatio || "(empty)"}`
+    );
+  }
+
   return {
     makeupIntensity,
     editArea,
     preserveLevel,
     outputCount: outputCount as (typeof validOutputCount)[number],
-    outputResolution: outputResolution as OutputResolution
+    outputResolution: outputResolution as OutputResolution,
+    outputAspectRatio: outputAspectRatio as OutputAspectRatio
   };
 }
 
@@ -167,6 +199,27 @@ function getOriginalAspect(width?: number, height?: number): OriginalAspect {
   }
 
   return width > height ? "landscape" : "portrait";
+}
+
+function resolveOutputAspectRatio(
+  outputAspectRatio: OutputAspectRatio,
+  dimensions: ImageDimensions | null
+): FixedOutputAspectRatio {
+  if (outputAspectRatio !== "original") {
+    return outputAspectRatio;
+  }
+
+  if (!dimensions?.width || !dimensions.height) {
+    return "1:1";
+  }
+
+  const originalRatio = dimensions.width / dimensions.height;
+
+  return fixedAspectRatios.reduce((closest, current) => {
+    const closestDistance = Math.abs(originalRatio - closest.ratio);
+    const currentDistance = Math.abs(originalRatio - current.ratio);
+    return currentDistance < closestDistance ? current : closest;
+  }).value;
 }
 
 function readUint24LE(buffer: Buffer, offset: number) {
@@ -275,13 +328,124 @@ function getImageDimensionsFromBuffer(buffer: Buffer) {
   return getPngDimensions(buffer) ?? getJpegDimensions(buffer) ?? getWebpDimensions(buffer);
 }
 
-async function readOriginalAspect(file: File): Promise<OriginalAspect> {
+async function readOriginalDimensions(file: File): Promise<ImageDimensions | null> {
   try {
     const buffer = Buffer.from(await file.arrayBuffer());
-    const dimensions = getImageDimensionsFromBuffer(buffer);
-    return getOriginalAspect(dimensions?.width, dimensions?.height);
+    return getImageDimensionsFromBuffer(buffer);
   } catch {
-    return "unknown";
+    return null;
+  }
+}
+
+function getOptionalText(formData: FormData, key: string) {
+  const value = formData.get(key);
+
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function dataUrlToBuffer(dataUrl: string, fieldName: string) {
+  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/);
+
+  if (!match) {
+    throw new AppApiError(
+      "IMAGE_POSTPROCESS_FAILED",
+      "图片后处理失败，无法应用网页遮罩。",
+      `${fieldName} is not a valid image data URL.`
+    );
+  }
+
+  return {
+    mimeType: match[1],
+    buffer: Buffer.from(match[2].replace(/\s/g, ""), "base64")
+  };
+}
+
+async function imageResultToBuffer(imageValue: string) {
+  if (/^data:image\//i.test(imageValue)) {
+    return dataUrlToBuffer(imageValue, "generatedImage").buffer;
+  }
+
+  if (/^https?:\/\//i.test(imageValue)) {
+    const response = await fetch(imageValue);
+
+    if (!response.ok) {
+      throw new AppApiError(
+        "IMAGE_POSTPROCESS_FAILED",
+        "图片后处理失败，无法应用网页遮罩。",
+        `Unable to fetch generated image for mask compositing. status=${response.status}; statusText=${response.statusText}`
+      );
+    }
+
+    return Buffer.from(await response.arrayBuffer());
+  }
+
+  throw new AppApiError(
+    "IMAGE_POSTPROCESS_FAILED",
+    "图片后处理失败，无法应用网页遮罩。",
+    "Generated image is neither a data URL nor an HTTP URL."
+  );
+}
+
+async function compositeGeneratedImageWithMask({
+  originalImageFile,
+  generatedDataUrl,
+  maskBase64
+}: {
+  originalImageFile: File;
+  generatedDataUrl: string;
+  maskBase64: string;
+}) {
+  try {
+    const originalBuffer = Buffer.from(await originalImageFile.arrayBuffer());
+    const generatedBuffer = await imageResultToBuffer(generatedDataUrl);
+    const maskBuffer = dataUrlToBuffer(maskBase64, "maskBase64").buffer;
+    const originalMetadata = await sharp(originalBuffer).metadata();
+    const originalWidth = originalMetadata.width;
+    const originalHeight = originalMetadata.height;
+
+    if (!originalWidth || !originalHeight) {
+      throw new Error("Unable to read original image dimensions for mask compositing.");
+    }
+
+    const baseBuffer = await sharp(originalBuffer)
+      .resize(originalWidth, originalHeight, { fit: "fill" })
+      .png()
+      .toBuffer();
+    const resizedGeneratedBuffer = await sharp(generatedBuffer)
+      .resize(originalWidth, originalHeight, { fit: "fill" })
+      .png()
+      .toBuffer();
+    const alphaMaskBuffer = await sharp(maskBuffer)
+      .resize(originalWidth, originalHeight, { fit: "fill" })
+      .removeAlpha()
+      .grayscale()
+      .toBuffer();
+    const generatedWithMask = await sharp(resizedGeneratedBuffer)
+      .removeAlpha()
+      .joinChannel(alphaMaskBuffer)
+      .png()
+      .toBuffer();
+    const compositedBuffer = await sharp(baseBuffer)
+      .composite([{ input: generatedWithMask, blend: "over" }])
+      .png()
+      .toBuffer();
+
+    return {
+      dataUrl: `data:image/png;base64,${compositedBuffer.toString("base64")}`,
+      mimeType: "image/png"
+    };
+  } catch (error) {
+    if (error instanceof AppApiError) {
+      throw error;
+    }
+
+    const debug = error instanceof Error ? `${error.name}: ${error.message}` : "Unknown mask compositing error.";
+
+    throw new AppApiError(
+      "IMAGE_POSTPROCESS_FAILED",
+      "图片后处理失败，无法应用网页遮罩。",
+      sanitizeDebugText(debug)
+    );
   }
 }
 
@@ -295,10 +459,14 @@ export async function POST(request: Request) {
     const negativePrompt = getRequiredText(formData, "negativePrompt");
     const settings = parseSettings(formData);
     const apiKey = String(formData.get("relayApiKey") ?? "");
-    const originalAspect = await readOriginalAspect(originalImageFile);
+    const maskBase64 = getOptionalText(formData, "maskBase64");
+    const originalDimensions = await readOriginalDimensions(originalImageFile);
+    const originalAspect = getOriginalAspect(originalDimensions?.width, originalDimensions?.height);
+    const resolvedAspectRatio = resolveOutputAspectRatio(settings.outputAspectRatio, originalDimensions);
     const generationSettings = {
       ...settings,
-      originalAspect
+      originalAspect,
+      resolvedAspectRatio
     };
     const images = [];
 
@@ -313,7 +481,7 @@ export async function POST(request: Request) {
         );
       }
 
-      const generated = await generateNanoBananaRelayImage({
+      const generated = await generateWithGeminiRelay({
         apiKey,
         baseUrl: FIXED_RELAY_BASE_URL,
         originalImageFile,
@@ -324,12 +492,21 @@ export async function POST(request: Request) {
         variationIndex: index + 1,
         requestTimeoutMs: Math.min(50000, Math.max(MIN_RELAY_ATTEMPT_MS, remainingMs - 3000))
       });
+      const finalImage = maskBase64
+        ? await compositeGeneratedImageWithMask({
+            originalImageFile,
+            generatedDataUrl: generated.dataUrl,
+            maskBase64
+          })
+        : generated;
 
       images.push({
         id: `result-${index + 1}`,
-        dataUrl: generated.dataUrl,
-        mimeType: generated.mimeType,
+        dataUrl: finalImage.dataUrl,
+        mimeType: finalImage.mimeType,
         outputResolution: settings.outputResolution,
+        outputAspectRatio: settings.outputAspectRatio,
+        resolvedAspectRatio,
         originalAspect
       });
     }

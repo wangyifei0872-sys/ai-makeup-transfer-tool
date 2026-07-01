@@ -1,13 +1,24 @@
 "use client";
 
-import { Clock3, Settings, UserRound } from "lucide-react";
+import { Clock3, Moon, Settings, Sun, UserRound } from "lucide-react";
+
+type ThemeMode = "light" | "dark";
 
 type HeaderProps = {
   apiKeysConfigured: boolean;
+  theme: ThemeMode;
   onOpenSettings: () => void;
+  onOpenHistory: () => void;
+  onToggleTheme: () => void;
 };
 
-export function Header({ apiKeysConfigured, onOpenSettings }: HeaderProps) {
+export function Header({
+  apiKeysConfigured,
+  theme,
+  onOpenSettings,
+  onOpenHistory,
+  onToggleTheme
+}: HeaderProps) {
   return (
     <header className="sticky top-0 z-30 border-b border-app-border bg-white/90 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-8">
@@ -26,12 +37,24 @@ export function Header({ apiKeysConfigured, onOpenSettings }: HeaderProps) {
         <nav className="flex items-center gap-2">
           <button
             type="button"
+            onClick={onOpenHistory}
             className="inline-flex h-10 items-center gap-2 rounded-xl border border-app-border bg-white px-4 text-sm font-medium text-app-text transition hover:border-app-primary/50 hover:text-app-primary"
           >
             <Clock3 className="h-4 w-4" />
             历史记录
           </button>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-label={theme === "dark" ? "切换浅色模式" : "切换夜晚模式"}
+              onClick={onToggleTheme}
+              className="inline-flex h-10 items-center gap-2 rounded-xl border border-app-border bg-white px-3 text-sm font-medium text-app-text transition hover:border-app-primary/50 hover:text-app-primary"
+            >
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              <span className="hidden xl:inline">
+                {theme === "dark" ? "浅色模式" : "夜晚模式"}
+              </span>
+            </button>
             <button
               type="button"
               aria-label="设置"
