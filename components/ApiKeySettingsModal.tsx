@@ -25,6 +25,7 @@ type ApiKeySettingsModalProps = {
 
 type TestResult = {
   ok: boolean;
+  tone?: "success" | "warning" | "error";
   message: string;
   code?: string;
   debug?: string;
@@ -35,24 +36,32 @@ const emptyKeys: StoredApiKeys = {
 };
 
 function TestResultCard({ result }: { result: TestResult }) {
+  const tone = result.tone ?? (result.ok ? "success" : "error");
+  const toneClass =
+    tone === "warning"
+      ? "border-amber-200 bg-amber-50 text-amber-800"
+      : tone === "success"
+        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+        : "border-red-200 bg-red-50 text-red-700";
+  const debugClass =
+    tone === "warning"
+      ? "border-amber-100 bg-white p-2 leading-5 text-amber-900"
+      : "border-red-100 bg-white p-2 leading-5 text-red-900";
+
   return (
     <div
-      className={`rounded-xl border px-3 py-2 text-xs font-medium ${
-        result.ok
-          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-          : "border-red-200 bg-red-50 text-red-700"
-      }`}
+      className={`rounded-xl border px-3 py-2 text-xs font-medium ${toneClass}`}
     >
       <div>{result.message}</div>
-      {!result.ok && result.code ? (
+      {result.code ? (
         <div className="mt-2 inline-flex rounded-full bg-white/80 px-2 py-1 font-mono">
           {result.code}
         </div>
       ) : null}
-      {!result.ok && result.debug ? (
+      {result.debug ? (
         <details className="mt-2">
           <summary className="cursor-pointer select-none font-semibold">展开 debug</summary>
-          <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-red-100 bg-white p-2 leading-5 text-red-900">
+          <pre className={`mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-xl border ${debugClass}`}>
             {result.debug}
           </pre>
         </details>
@@ -192,13 +201,22 @@ export function ApiKeySettingsModal({
         })
       });
       const data = (await response.json()) as
-        | { ok: true; message: string; label: string; model: string }
+        | {
+            ok: true;
+            message: string;
+            label: string;
+            model: string;
+            warning?: { code: string; message: string; debug?: string };
+          }
         | { ok: false; error: AnalyzeApiError };
 
       if (response.ok && data.ok) {
         setImageTestResult({
           ok: true,
-          message: `生图模型连接成功：${data.model}`
+          tone: data.warning ? "warning" : "success",
+          message: data.warning?.message ?? `生图接口连接成功：${data.model}`,
+          code: data.warning?.code,
+          debug: data.warning?.debug
         });
         return;
       }
@@ -326,7 +344,7 @@ export function ApiKeySettingsModal({
                 ) : (
                   <PlugZap className="h-4 w-4" />
                 )}
-                {testingTarget === "image" ? "测试中..." : "测试生图模型连接"}
+                {testingTarget === "image" ? "测试中..." : "测试接口连接"}
               </button>
             </div>
 

@@ -42,10 +42,26 @@ export async function POST(request: Request) {
       model: FIXED_IMAGE_MODEL.model
     });
   } catch (error) {
+    const apiError = toBananaRelayApiError(error);
+
+    if (apiError.code === "IMAGE_RELAY_NO_IMAGE") {
+      return NextResponse.json({
+        ok: true,
+        message: "生图接口连接成功。正式生图请上传原图和参考图后测试。",
+        label: FIXED_IMAGE_MODEL.label,
+        model: FIXED_IMAGE_MODEL.model,
+        warning: {
+          code: "IMAGE_MODEL_TEST_NO_IMAGE",
+          message: "测试请求未返回图片，但接口已连接成功。正式生成请以上传图片后的结果为准。",
+          debug: apiError.debug
+        }
+      });
+    }
+
     return NextResponse.json(
       {
         ok: false,
-        error: toBananaRelayApiError(error)
+        error: apiError
       },
       { status: 400 }
     );
